@@ -47,7 +47,7 @@ jobs:
           token: ${{ secrets.REPLICATE_API_TOKEN }}
 
       - name: Build with Cog
-        run: cog build -t r8.im/ahmetsaid/pbr-texture-gen
+        run: cog build --no-cache -t r8.im/ahmetsaid/pbr-texture-gen
 
       - name: Login to Replicate Registry
         run: echo ${{ secrets.REPLICATE_API_TOKEN }} | docker login r8.im -u ahmetsaid --password-stdin

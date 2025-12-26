@@ -37,6 +37,16 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Debug - Show predict.py imports
+        run: |
+          echo "=== First 15 lines of predict.py ==="
+          head -15 predict.py
+          echo "=== Checking for FluxPipeline ==="
+          grep -n "FluxPipeline" predict.py || echo "FluxPipeline NOT found (good!)"
+          grep -n "AutoPipeline" predict.py || echo "AutoPipeline NOT found"
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -46,8 +56,18 @@ jobs:
         with:
           token: ${{ secrets.REPLICATE_API_TOKEN }}
 
+      - name: Remove old images
+        run: |
+          docker rmi r8.im/ahmetsaid/pbr-texture-gen 2>/dev/null || true
+          docker system prune -af
+
       - name: Build with Cog
         run: cog build --no-cache -t r8.im/ahmetsaid/pbr-texture-gen
+
+      - name: Verify built image
+        run: |
+          echo "=== Checking predict.py inside Docker image ==="
+          docker run --rm --entrypoint cat r8.im/ahmetsaid/pbr-texture-gen /src/predict.py | head -15
 
       - name: Login to Replicate Registry
         run: echo ${{ secrets.REPLICATE_API_TOKEN }} | docker login r8.im -u ahmetsaid --password-stdin

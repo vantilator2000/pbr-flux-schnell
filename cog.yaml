@@ -10,9 +10,9 @@ build:
   python_packages:
     - "torch==2.2.0"
     - "torchvision==0.17.0"
-    - "diffusers==0.31.0"
-    - "transformers==4.42.0"
-    - "accelerate==0.33.0"
+    - "diffusers==0.32.2"
+    - "transformers==4.47.0"
+    - "accelerate==1.2.1"
     - "sentencepiece==0.2.0"
     - "protobuf==5.27.3"
     - "numpy==1.26.4"

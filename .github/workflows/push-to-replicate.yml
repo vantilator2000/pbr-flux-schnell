@@ -21,6 +21,8 @@ jobs:
           token: ${{ secrets.REPLICATE_API_TOKEN }}
 
       - name: Build and Push
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           cog build -t r8.im/vantilator2000/pbr-flux
           cog push r8.im/vantilator2000/pbr-flux

@@ -158,15 +158,16 @@ class HeightProcessor:
         strength: float = 0.5
     ) -> np.ndarray:
         """
-        Make height map seamlessly tileable.
+        Make height map seamlessly tileable using offset method.
 
-        Uses edge blending to ensure left matches right, top matches bottom.
-        This is CRITICAL: must be done BEFORE deriving normal/AO maps,
-        otherwise those maps will have visible seams.
+        Uses the classic "offset and blend" technique:
+        1. Shift image by 50% to put edges in center
+        2. Blend the center seams with smooth falloff
+        3. Result tiles perfectly at original edges
 
         Args:
             height: Height map [0, 1]
-            strength: Blend region size as fraction of image (0-1)
+            strength: Blend intensity (0-1)
 
         Returns:
             Tile-safe height map
@@ -175,60 +176,47 @@ class HeightProcessor:
             return height
 
         h, w = height.shape
-        blend_size = int(min(h, w) * 0.25 * strength)
-        if blend_size < 2:
+        blend_width = int(min(h, w) * 0.15 * strength)  # Blend region
+        if blend_width < 4:
             return height
 
-        result = height.copy()
+        # Step 1: Shift image by 50% - seams now in center
+        shifted = np.roll(np.roll(height, h // 2, axis=0), w // 2, axis=1)
 
-        # Horizontal seamless (left-right)
-        result = self._blend_edges_horizontal(result, blend_size)
+        # Step 2: Create smooth blend mask for center cross
+        mask = self._create_center_blend_mask(h, w, blend_width)
 
-        # Vertical seamless (top-bottom)
-        result = self._blend_edges_vertical(result, blend_size)
+        # Step 3: Blend shifted with original at center
+        # Where mask=1, use original (edges); where mask=0, use shifted (center)
+        result = shifted * (1 - mask) + height * mask
+
+        # Step 4: Shift back
+        result = np.roll(np.roll(result, -h // 2, axis=0), -w // 2, axis=1)
 
         return result.astype(np.float32)
 
-    def _blend_edges_horizontal(self, arr: np.ndarray, blend_size: int) -> np.ndarray:
-        """Blend left and right edges for horizontal tiling."""
-        h, w = arr.shape
-        result = arr.copy()
+    def _create_center_blend_mask(self, h: int, w: int, blend_width: int) -> np.ndarray:
+        """
+        Create a mask that's 0 at center cross, 1 at edges.
+        Uses smoothstep for artifact-free blending.
+        """
+        # Horizontal distance from center
+        x = np.abs(np.arange(w) - w // 2)
+        x_mask = self._smoothstep(x, blend_width // 2, blend_width)
 
-        for i in range(blend_size):
-            t = i / blend_size  # 0 at edge, 1 at blend_size
-            weight = t  # Linear fade
+        # Vertical distance from center
+        y = np.abs(np.arange(h) - h // 2)
+        y_mask = self._smoothstep(y, blend_width // 2, blend_width)
 
-            left_col = i
-            right_col = w - blend_size + i
+        # Combine: both must be away from center
+        mask = np.outer(y_mask, np.ones(w)) * np.outer(np.ones(h), x_mask)
 
-            # Blend: at left edge use right values, fade to left values
-            blended_left = (1 - weight) * arr[:, right_col] + weight * arr[:, left_col]
-            blended_right = weight * arr[:, right_col] + (1 - weight) * arr[:, left_col]
+        return mask
 
-            result[:, left_col] = blended_left
-            result[:, right_col] = blended_right
-
-        return result
-
-    def _blend_edges_vertical(self, arr: np.ndarray, blend_size: int) -> np.ndarray:
-        """Blend top and bottom edges for vertical tiling."""
-        h, w = arr.shape
-        result = arr.copy()
-
-        for i in range(blend_size):
-            t = i / blend_size
-            weight = t
-
-            top_row = i
-            bottom_row = h - blend_size + i
-
-            blended_top = (1 - weight) * arr[bottom_row, :] + weight * arr[top_row, :]
-            blended_bottom = weight * arr[bottom_row, :] + (1 - weight) * arr[top_row, :]
-
-            result[top_row, :] = blended_top
-            result[bottom_row, :] = blended_bottom
-
-        return result
+    def _smoothstep(self, x: np.ndarray, edge0: float, edge1: float) -> np.ndarray:
+        """Smooth Hermite interpolation between 0 and 1."""
+        t = np.clip((x - edge0) / (edge1 - edge0 + 1e-8), 0, 1)
+        return t * t * (3 - 2 * t)
 
 
 # =============================================================================
@@ -437,7 +425,7 @@ class RoughnessGenerator:
 
 class SeamlessTiling:
     """
-    Make RGB images seamlessly tileable.
+    Make RGB images seamlessly tileable using offset method.
     """
 
     def make_seamless(
@@ -446,7 +434,12 @@ class SeamlessTiling:
         strength: float = 0.5
     ) -> Image.Image:
         """
-        Make RGB image seamlessly tileable.
+        Make RGB image seamlessly tileable using offset method.
+
+        Uses the classic "offset and blend" technique:
+        1. Shift image by 50% to put edges in center
+        2. Blend the center seams with smooth falloff
+        3. Result tiles perfectly at original edges
 
         Args:
             image: RGB PIL image
@@ -460,32 +453,51 @@ class SeamlessTiling:
 
         img_array = np.array(image, dtype=np.float32)
         h, w = img_array.shape[:2]
-        blend_size = int(min(h, w) * 0.25 * strength)
+        blend_width = int(min(h, w) * 0.15 * strength)
 
-        if blend_size < 2:
+        if blend_width < 4:
             return image
 
-        result = img_array.copy()
+        # Step 1: Shift image by 50% - seams now in center
+        shifted = np.roll(np.roll(img_array, h // 2, axis=0), w // 2, axis=1)
 
-        # Blend horizontal edges
-        for i in range(blend_size):
-            weight = i / blend_size
-            left_col = i
-            right_col = w - blend_size + i
+        # Step 2: Create smooth blend mask for center cross
+        mask = self._create_center_blend_mask(h, w, blend_width)
 
-            result[:, left_col] = (1 - weight) * img_array[:, right_col] + weight * img_array[:, left_col]
-            result[:, right_col] = weight * img_array[:, left_col] + (1 - weight) * img_array[:, right_col]
+        # Expand mask for RGB channels
+        if len(img_array.shape) == 3:
+            mask = mask[:, :, np.newaxis]
 
-        # Blend vertical edges
-        for i in range(blend_size):
-            weight = i / blend_size
-            top_row = i
-            bottom_row = h - blend_size + i
+        # Step 3: Blend shifted with original at center
+        result = shifted * (1 - mask) + img_array * mask
 
-            result[top_row, :] = (1 - weight) * result[bottom_row, :] + weight * result[top_row, :]
-            result[bottom_row, :] = weight * result[top_row, :] + (1 - weight) * result[bottom_row, :]
+        # Step 4: Shift back
+        result = np.roll(np.roll(result, -h // 2, axis=0), -w // 2, axis=1)
 
         return Image.fromarray(np.clip(result, 0, 255).astype(np.uint8))
+
+    def _create_center_blend_mask(self, h: int, w: int, blend_width: int) -> np.ndarray:
+        """
+        Create a mask that's 0 at center cross, 1 at edges.
+        Uses smoothstep for artifact-free blending.
+        """
+        # Horizontal distance from center
+        x = np.abs(np.arange(w) - w // 2)
+        x_mask = self._smoothstep(x, blend_width // 2, blend_width)
+
+        # Vertical distance from center
+        y = np.abs(np.arange(h) - h // 2)
+        y_mask = self._smoothstep(y, blend_width // 2, blend_width)
+
+        # Combine: both must be away from center
+        mask = np.outer(y_mask, np.ones(w)) * np.outer(np.ones(h), x_mask)
+
+        return mask
+
+    def _smoothstep(self, x: np.ndarray, edge0: float, edge1: float) -> np.ndarray:
+        """Smooth Hermite interpolation between 0 and 1."""
+        t = np.clip((x - edge0) / (edge1 - edge0 + 1e-8), 0, 1)
+        return t * t * (3 - 2 * t)
 
 
 # =============================================================================

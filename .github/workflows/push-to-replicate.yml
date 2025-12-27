@@ -24,12 +24,16 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          pip install huggingface_hub
-          huggingface-cli login --token $HF_TOKEN
+          pip install huggingface_hub diffusers torch transformers accelerate
           mkdir -p model_cache
-          export HF_HOME=$(pwd)/model_cache
-          pip install diffusers torch transformers accelerate
-          python -c "import os; os.environ['HF_HOME']='$(pwd)/model_cache'; from diffusers import FluxPipeline; FluxPipeline.from_pretrained('black-forest-labs/FLUX.1-schnell', torch_dtype='auto', cache_dir='$(pwd)/model_cache')"
+          python -c "
+          import os
+          from huggingface_hub import login
+          login(token='$HF_TOKEN')
+          os.environ['HF_HOME'] = 'model_cache'
+          from diffusers import FluxPipeline
+          FluxPipeline.from_pretrained('black-forest-labs/FLUX.1-schnell', torch_dtype='auto', cache_dir='model_cache')
+          "
           ls -la model_cache/
 
       - name: Setup Cog

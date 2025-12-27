@@ -1,87 +1,26 @@
-# PBR Texture Generator - Playground v2.5 version
+# PBR Texture Generator v2 - AI Depth Estimation
 from cog import BasePredictor, Input, Path
 import os
 import torch
 import numpy as np
 from PIL import Image
 from diffusers import DiffusionPipeline
-from scipy.ndimage import sobel, gaussian_filter
-from typing import Optional
+from typing import Literal
 
-
-def make_seamless(image: Image.Image, strength: float = 0.5) -> Image.Image:
-    if strength <= 0:
-        return image
-    img_array = np.array(image, dtype=np.float32)
-    h, w = img_array.shape[:2]
-    blend_size = int(min(h, w) * 0.25 * strength)
-    if blend_size < 2:
-        return image
-    result = img_array.copy()
-    weights = np.linspace(0, 1, blend_size)
-    for i, weight in enumerate(weights):
-        left_col, right_col = i, w - blend_size + i
-        if len(img_array.shape) == 3:
-            result[:, left_col] = (1 - weight) * img_array[:, right_col] + weight * img_array[:, left_col]
-            result[:, right_col] = weight * img_array[:, left_col] + (1 - weight) * img_array[:, right_col]
-    for i, weight in enumerate(weights):
-        top_row, bottom_row = i, h - blend_size + i
-        if len(img_array.shape) == 3:
-            result[top_row, :] = (1 - weight) * result[bottom_row, :] + weight * result[top_row, :]
-            result[bottom_row, :] = weight * result[top_row, :] + (1 - weight) * result[bottom_row, :]
-    return Image.fromarray(np.clip(result, 0, 255).astype(np.uint8))
-
-
-def generate_normal_map(diffuse: Image.Image, strength: float = 1.0) -> Image.Image:
-    gray = np.array(diffuse.convert("L"), dtype=np.float32) / 255.0
-    gray = gaussian_filter(gray, sigma=0.5)
-    dx = sobel(gray, axis=1) * strength
-    dy = sobel(gray, axis=0) * strength
-    dz = np.ones_like(gray)
-    normals = np.stack([dx, -dy, dz], axis=-1)
-    normals = normals / (np.linalg.norm(normals, axis=-1, keepdims=True) + 1e-8)
-    normal_map = ((normals + 1) * 0.5 * 255).astype(np.uint8)
-    return Image.fromarray(normal_map, mode="RGB")
-
-
-def generate_roughness_map(diffuse: Image.Image) -> Image.Image:
-    gray = np.array(diffuse.convert("L"), dtype=np.float32)
-    blurred = gaussian_filter(gray, sigma=3)
-    local_var = gaussian_filter((gray - blurred) ** 2, sigma=5)
-    local_var = local_var / (local_var.max() + 1e-8)
-    intensity = 1.0 - (gray / 255.0)
-    roughness = 0.5 * local_var + 0.3 * intensity + 0.2
-    roughness = np.clip(roughness * 255, 0, 255).astype(np.uint8)
-    return Image.fromarray(roughness, mode="L")
-
-
-def generate_ao_map(diffuse: Image.Image) -> Image.Image:
-    gray = np.array(diffuse.convert("L"), dtype=np.float32) / 255.0
-    ao_fine = gaussian_filter(gray, sigma=2)
-    ao_medium = gaussian_filter(gray, sigma=8)
-    ao_coarse = gaussian_filter(gray, sigma=16)
-    ao = 0.4 * ao_fine + 0.35 * ao_medium + 0.25 * ao_coarse
-    ao = (ao - ao.min()) / (ao.max() - ao.min() + 1e-8)
-    ao = np.power(ao, 0.7)
-    ao = 0.3 + 0.7 * ao
-    return Image.fromarray((ao * 255).astype(np.uint8), mode="L")
-
-
-def create_grid(diffuse: Image.Image, normal: Image.Image, roughness: Image.Image, ao: Image.Image) -> Image.Image:
-    """Create 2x2 grid: color, normal, roughness, ao"""
-    w, h = diffuse.size
-    roughness_rgb = roughness.convert("RGB")
-    ao_rgb = ao.convert("RGB")
-    grid = Image.new("RGB", (w * 2, h * 2))
-    grid.paste(diffuse, (0, 0))
-    grid.paste(normal, (w, 0))
-    grid.paste(roughness_rgb, (0, h))
-    grid.paste(ao_rgb, (w, h))
-    return grid
+from pbr_maps import (
+    DepthEstimator,
+    HeightProcessor,
+    NormalGenerator,
+    AOGenerator,
+    RoughnessGenerator,
+    SeamlessTiling,
+    save_height_16bit
+)
 
 
 class Predictor(BasePredictor):
     def setup(self) -> None:
+        """Load models once during container startup"""
         print("Loading Playground v2.5...")
         self.pipe = DiffusionPipeline.from_pretrained(
             "playgroundai/playground-v2.5-1024px-aesthetic",
@@ -90,11 +29,27 @@ class Predictor(BasePredictor):
             local_files_only=True
         )
         self.pipe.to("cuda")
-        print("Model ready!")
+
+        print("Loading Intel DPT-Large for depth estimation...")
+        self.depth_estimator = DepthEstimator(
+            model_name="Intel/dpt-large",
+            device="cuda",
+            local_files_only=True
+        )
+
+        # Initialize processing classes (stateless)
+        self.height_processor = HeightProcessor()
+        self.normal_generator = NormalGenerator()
+        self.ao_generator = AOGenerator()
+        self.roughness_generator = RoughnessGenerator()
+        self.seamless_tiler = SeamlessTiling()
+
+        print("All models ready!")
 
     @torch.inference_mode()
     def predict(
         self,
+        # Input options
         input_image: Path = Input(
             description="Optional: Upload your own texture image to generate PBR maps (skips AI generation)",
             default=None
@@ -112,10 +67,6 @@ class Predictor(BasePredictor):
             choices=[512, 1024],
             default=1024
         ),
-        tiling_strength: float = Input(
-            description="Seamless tiling strength (0-1)",
-            ge=0.0, le=1.0, default=0.5
-        ),
         num_steps: int = Input(
             description="Number of inference steps (only used when generating from prompt)",
             ge=1, le=50, default=25
@@ -124,67 +75,202 @@ class Predictor(BasePredictor):
             description="Random seed (-1 for random)",
             default=-1
         ),
+
+        # Tiling controls
+        tiling_strength: float = Input(
+            description="Seamless tiling strength (0-1)",
+            ge=0.0, le=1.0, default=0.5
+        ),
+
+        # Height map controls
+        height_contrast: float = Input(
+            description="Height map contrast adjustment",
+            ge=0.5, le=3.0, default=1.0
+        ),
+        height_gamma: float = Input(
+            description="Height map gamma (>1 darkens, <1 lightens)",
+            ge=0.3, le=3.0, default=1.0
+        ),
+        suppress_scene_depth: bool = Input(
+            description="Suppress large-scale depth variations (recommended for textures)",
+            default=True
+        ),
+
+        # Normal map controls
+        normal_strength: float = Input(
+            description="Normal map intensity",
+            ge=0.1, le=5.0, default=1.0
+        ),
+        normal_format: str = Input(
+            description="Normal map format (opengl=Y+ up for Blender/Unreal, directx=Y- for Unity)",
+            choices=["opengl", "directx"],
+            default="opengl"
+        ),
+
+        # AO controls
+        ao_strength: float = Input(
+            description="Ambient occlusion intensity",
+            ge=0.0, le=2.0, default=1.0
+        ),
+        ao_radius: float = Input(
+            description="AO sampling radius (affects shadow spread)",
+            ge=1.0, le=32.0, default=8.0
+        ),
+
+        # Roughness controls
+        roughness_contrast: float = Input(
+            description="Roughness map contrast",
+            ge=0.5, le=2.0, default=1.0
+        ),
+        roughness_base: float = Input(
+            description="Base roughness level (0=smooth, 1=rough)",
+            ge=0.0, le=1.0, default=0.5
+        ),
+
+        # Output options
+        output_16bit_height: bool = Input(
+            description="Export height map as 16-bit PNG (higher precision)",
+            default=False
+        ),
     ) -> list[Path]:
+        """Generate PBR texture maps with AI depth estimation"""
+
         if seed == -1:
             seed = int.from_bytes(os.urandom(2), "big")
 
-        # Check if user provided an input image
+        # Step 1: Get or generate base image
         if input_image is not None:
-            print("Using uploaded image for PBR map generation...")
+            print("Using uploaded image...")
             image = Image.open(str(input_image)).convert("RGB")
             print(f"Input image size: {image.size}")
         else:
-            print(f"Seed: {seed}, Resolution: {resolution}, Steps: {num_steps}")
+            print(f"Generating texture (seed={seed}, resolution={resolution}, steps={num_steps})...")
+            image = self._generate_texture(prompt, negative_prompt, resolution, num_steps, seed)
 
-            enhanced_prompt = f"{prompt}, seamless tileable texture, top-down view, flat lighting, PBR material"
-            generator = torch.Generator("cuda").manual_seed(seed)
+        # Step 2: Estimate depth using DPT
+        print("Estimating depth with AI...")
+        raw_depth = self.depth_estimator.estimate_depth(image)
 
-            print("Generating color...")
-            output = self.pipe(
-                prompt=enhanced_prompt,
-                negative_prompt=negative_prompt if negative_prompt else None,
-                width=resolution,
-                height=resolution,
-                num_inference_steps=num_steps,
-                guidance_scale=3.0,
-                generator=generator,
-            )
-            image = output.images[0]
+        # Step 3: Convert depth to height map
+        print("Processing height map...")
+        height = self.height_processor.depth_to_height(
+            raw_depth,
+            suppress_scene_depth=suppress_scene_depth
+        )
+        height = self.height_processor.apply_contrast_gamma(
+            height,
+            contrast=height_contrast,
+            gamma=height_gamma
+        )
 
+        # Step 4: Make height map tile-safe BEFORE deriving other maps
         if tiling_strength > 0:
-            image = make_seamless(image, tiling_strength)
+            print("Making maps seamless...")
+            height = self.height_processor.make_tile_safe(height, strength=tiling_strength)
+            image = self.seamless_tiler.make_seamless(image, strength=tiling_strength)
 
-        print("Generating normal...")
-        normal = generate_normal_map(image)
-        if tiling_strength > 0:
-            normal = make_seamless(normal, tiling_strength)
+        # Step 5: Generate derived maps from tile-safe height
+        print("Generating normal map...")
+        normal = self.normal_generator.height_to_normal(
+            height,
+            strength=normal_strength,
+            format=normal_format
+        )
 
-        print("Generating roughness...")
-        roughness = generate_roughness_map(image)
-        if tiling_strength > 0:
-            roughness = make_seamless(roughness, tiling_strength)
+        print("Generating AO map...")
+        ao = self.ao_generator.height_to_ao(
+            height,
+            strength=ao_strength,
+            radius=ao_radius
+        )
 
-        print("Generating AO...")
-        ao = generate_ao_map(image)
-        if tiling_strength > 0:
-            ao = make_seamless(ao, tiling_strength)
+        print("Generating roughness map...")
+        roughness = self.roughness_generator.estimate_roughness(
+            image,
+            height,
+            contrast=roughness_contrast,
+            base_roughness=roughness_base
+        )
 
-        # Save all outputs
-        color_path = "/tmp/color.png"
-        normal_path = "/tmp/normal.png"
-        roughness_path = "/tmp/roughness.png"
-        ao_path = "/tmp/ao.png"
-        grid_path = "/tmp/grid.png"
-
-        image.save(color_path)
-        normal.save(normal_path)
-        roughness.save(roughness_path)
-        ao.save(ao_path)
-
-        grid = create_grid(image, normal, roughness, ao)
-        grid.save(grid_path)
+        # Step 6: Save outputs
+        output_paths = self._save_outputs(
+            image, height, normal, ao, roughness,
+            output_16bit_height=output_16bit_height
+        )
 
         print(f"Done! Seed: {seed}")
+        return output_paths
 
-        # Return: color, normal, roughness, ao, grid
-        return [Path(color_path), Path(normal_path), Path(roughness_path), Path(ao_path), Path(grid_path)]
+    def _generate_texture(self, prompt, negative_prompt, resolution, num_steps, seed):
+        """Generate texture using Playground v2.5"""
+        enhanced_prompt = f"{prompt}, seamless tileable texture, top-down view, flat lighting, PBR material"
+        generator = torch.Generator("cuda").manual_seed(seed)
+
+        output = self.pipe(
+            prompt=enhanced_prompt,
+            negative_prompt=negative_prompt if negative_prompt else None,
+            width=resolution,
+            height=resolution,
+            num_inference_steps=num_steps,
+            guidance_scale=3.0,
+            generator=generator,
+        )
+        return output.images[0]
+
+    def _save_outputs(self, image, height, normal, ao, roughness, output_16bit_height):
+        """Save all output files"""
+        paths = []
+
+        # Color
+        color_path = "/tmp/color.png"
+        image.save(color_path)
+        paths.append(Path(color_path))
+
+        # Height (8-bit or 16-bit)
+        height_path = "/tmp/height.png"
+        if output_16bit_height:
+            save_height_16bit(height, height_path)
+        else:
+            height_img = Image.fromarray((height * 255).astype(np.uint8), mode="L")
+            height_img.save(height_path)
+        paths.append(Path(height_path))
+
+        # Normal
+        normal_path = "/tmp/normal.png"
+        normal.save(normal_path)
+        paths.append(Path(normal_path))
+
+        # Roughness
+        roughness_path = "/tmp/roughness.png"
+        roughness.save(roughness_path)
+        paths.append(Path(roughness_path))
+
+        # AO
+        ao_path = "/tmp/ao.png"
+        ao.save(ao_path)
+        paths.append(Path(ao_path))
+
+        # Grid preview (3x2)
+        grid_path = "/tmp/grid.png"
+        grid = self._create_grid(image, height, normal, roughness, ao)
+        grid.save(grid_path)
+        paths.append(Path(grid_path))
+
+        return paths
+
+    def _create_grid(self, image, height, normal, roughness, ao):
+        """Create 3x2 preview grid: color, height, normal (top) | roughness, ao, blank (bottom)"""
+        w, h = image.size
+        height_img = Image.fromarray((height * 255).astype(np.uint8), mode="L").convert("RGB")
+        roughness_rgb = roughness.convert("RGB")
+        ao_rgb = ao.convert("RGB")
+
+        # 3x2 grid
+        grid = Image.new("RGB", (w * 3, h * 2), color=(40, 40, 40))
+        grid.paste(image, (0, 0))
+        grid.paste(height_img, (w, 0))
+        grid.paste(normal, (w * 2, 0))
+        grid.paste(roughness_rgb, (0, h))
+        grid.paste(ao_rgb, (w, h))
+
+        return grid

@@ -17,7 +17,9 @@ build:
     - "pillow"
     - "scipy"
     - "safetensors"
+    - "opencv-python-headless"
   run:
     - python -c "from diffusers import DiffusionPipeline; DiffusionPipeline.from_pretrained('playgroundai/playground-v2.5-1024px-aesthetic', variant='fp16')"
+    - python -c "from transformers import DPTImageProcessor, DPTForDepthEstimation; DPTImageProcessor.from_pretrained('Intel/dpt-large'); DPTForDepthEstimation.from_pretrained('Intel/dpt-large')"
 
 predict: "predict.py:Predictor"

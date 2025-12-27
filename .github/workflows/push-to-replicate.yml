@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - playground
+      - playground-v2
   workflow_dispatch:
 
 jobs:

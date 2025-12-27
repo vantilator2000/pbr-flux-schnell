@@ -1,9 +1,23 @@
 build:
+  gpu: true
+  cuda: "12.1"
   python_version: "3.11"
+  system_packages:
+    - "libgl1-mesa-glx"
+    - "libsm6"
+    - "libxext6"
   python_packages:
-    - "replicate"
+    - "torch==2.4.0"
+    - "torchvision==0.19.0"
+    - "diffusers==0.31.0"
+    - "transformers==4.44.0"
+    - "accelerate==0.33.0"
+    - "sentencepiece"
+    - "protobuf"
     - "pillow"
     - "scipy"
-    - "numpy"
+    - "safetensors"
+  run:
+    - python -c "from diffusers import StableDiffusionXLPipeline; StableDiffusionXLPipeline.from_pretrained('segmind/SSD-1B', variant='fp16', use_safetensors=True)"
 
 predict: "predict.py:Predictor"

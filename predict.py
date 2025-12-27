@@ -1,19 +1,12 @@
-# PBR Texture Generator - using z-image-turbo API
+# PBR Texture Generator - Segmind SSD-1B version
 from cog import BasePredictor, Input, Path
 import os
-import replicate
+import torch
 import numpy as np
 from typing import Iterator
 from PIL import Image
+from diffusers import StableDiffusionXLPipeline
 from scipy.ndimage import sobel, gaussian_filter
-import urllib.request
-
-
-def download_image(url: str) -> Image.Image:
-    """Download image from URL"""
-    with urllib.request.urlopen(url) as response:
-        from io import BytesIO
-        return Image.open(BytesIO(response.read())).convert("RGB")
 
 
 def make_seamless(image: Image.Image, strength: float = 0.5) -> Image.Image:
@@ -76,13 +69,20 @@ def generate_ao_map(diffuse: Image.Image) -> Image.Image:
 
 class Predictor(BasePredictor):
     def setup(self) -> None:
-        print("PBR Generator ready! (using z-image-turbo API)")
+        print("Loading Segmind SSD-1B...")
+        self.pipe = StableDiffusionXLPipeline.from_pretrained(
+            "segmind/SSD-1B",
+            torch_dtype=torch.float16,
+            use_safetensors=True,
+            variant="fp16",
+            local_files_only=True
+        )
+        self.pipe.to("cuda")
+        print("Model ready!")
 
+    @torch.inference_mode()
     def predict(
         self,
-        replicate_api_token: str = Input(
-            description="Your Replicate API token (required for image generation)"
-        ),
         prompt: str = Input(
             description="Text description of the texture",
             default="seamless dark wood texture, highly detailed, 8k"
@@ -96,33 +96,32 @@ class Predictor(BasePredictor):
             description="Seamless tiling strength (0-1)",
             ge=0.0, le=1.0, default=0.5
         ),
+        num_steps: int = Input(
+            description="Number of inference steps",
+            ge=1, le=30, default=8
+        ),
         seed: int = Input(
             description="Random seed (-1 for random)",
             default=-1
         ),
     ) -> Iterator[Path]:
         if seed == -1:
-            seed = int.from_bytes(os.urandom(4), "big") % (2**32)
-        print(f"Seed: {seed}, Resolution: {resolution}")
+            seed = int.from_bytes(os.urandom(2), "big")
+        print(f"Seed: {seed}, Resolution: {resolution}, Steps: {num_steps}")
 
         enhanced_prompt = f"{prompt}, seamless tileable texture, top-down view, flat lighting, PBR material"
+        generator = torch.Generator("cuda").manual_seed(seed)
 
-        print("Generating diffuse with z-image-turbo...")
-        client = replicate.Client(api_token=replicate_api_token)
-        output = client.run(
-            "prunaai/z-image-turbo",
-            input={
-                "prompt": enhanced_prompt,
-                "width": resolution,
-                "height": resolution,
-                "seed": seed,
-            }
+        print("Generating diffuse...")
+        output = self.pipe(
+            prompt=enhanced_prompt,
+            width=resolution,
+            height=resolution,
+            num_inference_steps=num_steps,
+            guidance_scale=7.0,
+            generator=generator,
         )
-
-        # z-image-turbo returns URL
-        image_url = output if isinstance(output, str) else str(output)
-        print(f"Downloading from: {image_url}")
-        image = download_image(image_url)
+        image = output.images[0]
 
         if tiling_strength > 0:
             image = make_seamless(image, tiling_strength)

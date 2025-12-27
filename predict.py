@@ -1,12 +1,19 @@
-# PBR Texture Generator - SDXL Turbo version
+# PBR Texture Generator - using z-image-turbo API
 from cog import BasePredictor, Input, Path
 import os
-import torch
+import replicate
 import numpy as np
 from typing import Iterator
 from PIL import Image
-from diffusers import AutoPipelineForText2Image
 from scipy.ndimage import sobel, gaussian_filter
+import urllib.request
+
+
+def download_image(url: str) -> Image.Image:
+    """Download image from URL"""
+    with urllib.request.urlopen(url) as response:
+        from io import BytesIO
+        return Image.open(BytesIO(response.read())).convert("RGB")
 
 
 def make_seamless(image: Image.Image, strength: float = 0.5) -> Image.Image:
@@ -69,17 +76,8 @@ def generate_ao_map(diffuse: Image.Image) -> Image.Image:
 
 class Predictor(BasePredictor):
     def setup(self) -> None:
-        print("Loading SDXL Turbo...")
-        self.pipe = AutoPipelineForText2Image.from_pretrained(
-            "stabilityai/sdxl-turbo",
-            torch_dtype=torch.float16,
-            variant="fp16",
-            local_files_only=True
-        )
-        self.pipe.to("cuda")
-        print("Model ready!")
+        print("PBR Generator ready! (using z-image-turbo API)")
 
-    @torch.inference_mode()
     def predict(
         self,
         prompt: str = Input(
@@ -101,22 +99,26 @@ class Predictor(BasePredictor):
         ),
     ) -> Iterator[Path]:
         if seed == -1:
-            seed = int.from_bytes(os.urandom(2), "big")
+            seed = int.from_bytes(os.urandom(4), "big") % (2**32)
         print(f"Seed: {seed}, Resolution: {resolution}")
 
-        enhanced_prompt = f"{prompt}, seamless tileable texture, top-down view, flat lighting"
-        generator = torch.Generator("cuda").manual_seed(seed)
+        enhanced_prompt = f"{prompt}, seamless tileable texture, top-down view, flat lighting, PBR material"
 
-        print("Generating diffuse...")
-        output = self.pipe(
-            prompt=enhanced_prompt,
-            width=resolution,
-            height=resolution,
-            num_inference_steps=4,
-            guidance_scale=0.0,
-            generator=generator,
+        print("Generating diffuse with z-image-turbo...")
+        output = replicate.run(
+            "prunaai/z-image-turbo",
+            input={
+                "prompt": enhanced_prompt,
+                "width": resolution,
+                "height": resolution,
+                "seed": seed,
+            }
         )
-        image = output.images[0]
+
+        # z-image-turbo returns URL
+        image_url = output if isinstance(output, str) else str(output)
+        print(f"Downloading from: {image_url}")
+        image = download_image(image_url)
 
         if tiling_strength > 0:
             image = make_seamless(image, tiling_strength)

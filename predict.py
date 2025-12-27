@@ -1,18 +1,11 @@
-# PBR Texture Generator - Segmind SSD-1B version
-from cog import BasePredictor, Input, Path, BaseModel
+# PBR Texture Generator - Flux Schnell version
+from cog import BasePredictor, Input, Path
 import os
 import torch
 import numpy as np
-from PIL import Image
-from diffusers import StableDiffusionXLPipeline
+from PIL import Image, ImageDraw, ImageFont
+from diffusers import FluxPipeline
 from scipy.ndimage import sobel, gaussian_filter
-
-
-class Output(BaseModel):
-    diffuse: Path
-    normal: Path
-    roughness: Path
-    ao: Path
 
 
 def make_seamless(image: Image.Image, strength: float = 0.5) -> Image.Image:
@@ -73,14 +66,32 @@ def generate_ao_map(diffuse: Image.Image) -> Image.Image:
     return Image.fromarray((ao * 255).astype(np.uint8), mode="L")
 
 
+def create_grid(diffuse: Image.Image, normal: Image.Image, roughness: Image.Image, ao: Image.Image) -> Image.Image:
+    """Create 2x2 grid with labels: Diffuse, Normal, Roughness, AO"""
+    w, h = diffuse.size
+
+    # Convert grayscale to RGB for grid
+    roughness_rgb = roughness.convert("RGB")
+    ao_rgb = ao.convert("RGB")
+
+    # Create grid image
+    grid = Image.new("RGB", (w * 2, h * 2))
+
+    # Place images: top-left=diffuse, top-right=normal, bottom-left=roughness, bottom-right=ao
+    grid.paste(diffuse, (0, 0))
+    grid.paste(normal, (w, 0))
+    grid.paste(roughness_rgb, (0, h))
+    grid.paste(ao_rgb, (w, h))
+
+    return grid
+
+
 class Predictor(BasePredictor):
     def setup(self) -> None:
-        print("Loading Segmind SSD-1B...")
-        self.pipe = StableDiffusionXLPipeline.from_pretrained(
-            "segmind/SSD-1B",
-            torch_dtype=torch.float16,
-            use_safetensors=True,
-            variant="fp16",
+        print("Loading Flux Schnell...")
+        self.pipe = FluxPipeline.from_pretrained(
+            "black-forest-labs/FLUX.1-schnell",
+            torch_dtype=torch.bfloat16,
             local_files_only=True
         )
         self.pipe.to("cuda")
@@ -104,13 +115,18 @@ class Predictor(BasePredictor):
         ),
         num_steps: int = Input(
             description="Number of inference steps",
-            ge=1, le=30, default=8
+            ge=1, le=10, default=4
         ),
         seed: int = Input(
             description="Random seed (-1 for random)",
             default=-1
         ),
-    ) -> Output:
+        output_format: str = Input(
+            description="Output format",
+            choices=["grid", "separate"],
+            default="separate"
+        ),
+    ) -> list[Path]:
         if seed == -1:
             seed = int.from_bytes(os.urandom(2), "big")
         print(f"Seed: {seed}, Resolution: {resolution}, Steps: {num_steps}")
@@ -124,7 +140,7 @@ class Predictor(BasePredictor):
             width=resolution,
             height=resolution,
             num_inference_steps=num_steps,
-            guidance_scale=7.0,
+            guidance_scale=0.0,
             generator=generator,
         )
         image = output.images[0]
@@ -132,35 +148,38 @@ class Predictor(BasePredictor):
         if tiling_strength > 0:
             image = make_seamless(image, tiling_strength)
 
-        diffuse_path = "/tmp/diffuse.png"
-        image.save(diffuse_path)
-
         print("Generating normal...")
         normal = generate_normal_map(image)
         if tiling_strength > 0:
             normal = make_seamless(normal, tiling_strength)
-        normal_path = "/tmp/normal.png"
-        normal.save(normal_path)
 
         print("Generating roughness...")
         roughness = generate_roughness_map(image)
         if tiling_strength > 0:
             roughness = make_seamless(roughness, tiling_strength)
-        roughness_path = "/tmp/roughness.png"
-        roughness.save(roughness_path)
 
         print("Generating AO...")
         ao = generate_ao_map(image)
         if tiling_strength > 0:
             ao = make_seamless(ao, tiling_strength)
-        ao_path = "/tmp/ao.png"
-        ao.save(ao_path)
 
         print(f"Done! Seed: {seed}")
 
-        return Output(
-            diffuse=Path(diffuse_path),
-            normal=Path(normal_path),
-            roughness=Path(roughness_path),
-            ao=Path(ao_path)
-        )
+        if output_format == "grid":
+            grid = create_grid(image, normal, roughness, ao)
+            grid_path = "/tmp/pbr_grid.png"
+            grid.save(grid_path)
+            return [Path(grid_path)]
+        else:
+            # Separate outputs: diffuse, normal, roughness, ao
+            diffuse_path = "/tmp/diffuse.png"
+            normal_path = "/tmp/normal.png"
+            roughness_path = "/tmp/roughness.png"
+            ao_path = "/tmp/ao.png"
+
+            image.save(diffuse_path)
+            normal.save(normal_path)
+            roughness.save(roughness_path)
+            ao.save(ao_path)
+
+            return [Path(diffuse_path), Path(normal_path), Path(roughness_path), Path(ao_path)]

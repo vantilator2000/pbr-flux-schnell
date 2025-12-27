@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - z-image-turbo
+      - flux-schnell
   workflow_dispatch:
 
 jobs:
@@ -21,5 +22,5 @@ jobs:
 
       - name: Build and Push
         run: |
-          cog build -t r8.im/vantilator2000/pbr-texture-gen
-          cog push r8.im/vantilator2000/pbr-texture-gen
+          cog build -t r8.im/vantilator2000/pbr-flux
+          cog push r8.im/vantilator2000/pbr-flux

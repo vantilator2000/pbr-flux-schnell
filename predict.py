@@ -115,11 +115,6 @@ class Predictor(BasePredictor):
             description="Random seed (-1 for random)",
             default=-1
         ),
-        output_format: str = Input(
-            description="Output format",
-            choices=["grid", "separate"],
-            default="separate"
-        ),
     ) -> list[Path]:
         if seed == -1:
             seed = int.from_bytes(os.urandom(2), "big")
@@ -157,22 +152,22 @@ class Predictor(BasePredictor):
         if tiling_strength > 0:
             ao = make_seamless(ao, tiling_strength)
 
+        # Save all outputs
+        color_path = "/tmp/color.png"
+        normal_path = "/tmp/normal.png"
+        roughness_path = "/tmp/roughness.png"
+        ao_path = "/tmp/ao.png"
+        grid_path = "/tmp/grid.png"
+
+        image.save(color_path)
+        normal.save(normal_path)
+        roughness.save(roughness_path)
+        ao.save(ao_path)
+
+        grid = create_grid(image, normal, roughness, ao)
+        grid.save(grid_path)
+
         print(f"Done! Seed: {seed}")
 
-        if output_format == "grid":
-            grid = create_grid(image, normal, roughness, ao)
-            grid_path = "/tmp/pbr_grid.png"
-            grid.save(grid_path)
-            return [Path(grid_path)]
-        else:
-            color_path = "/tmp/color.png"
-            normal_path = "/tmp/normal.png"
-            roughness_path = "/tmp/roughness.png"
-            ao_path = "/tmp/ao.png"
-
-            image.save(color_path)
-            normal.save(normal_path)
-            roughness.save(roughness_path)
-            ao.save(ao_path)
-
-            return [Path(color_path), Path(normal_path), Path(roughness_path), Path(ao_path)]
+        # Return: color, normal, roughness, ao, grid
+        return [Path(color_path), Path(normal_path), Path(roughness_path), Path(ao_path), Path(grid_path)]

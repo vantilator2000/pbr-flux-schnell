@@ -21,5 +21,5 @@ jobs:
 
       - name: Build and Push
         run: |
-          cog build -t r8.im/vantilator2000/z-image-pbr-turbo
-          cog push r8.im/vantilator2000/z-image-pbr-turbo
+          cog build -t r8.im/vantilator2000/pbr-texture-gen
+          cog push r8.im/vantilator2000/pbr-texture-gen

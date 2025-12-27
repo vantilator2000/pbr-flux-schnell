@@ -80,6 +80,9 @@ class Predictor(BasePredictor):
 
     def predict(
         self,
+        replicate_api_token: str = Input(
+            description="Your Replicate API token (required for image generation)"
+        ),
         prompt: str = Input(
             description="Text description of the texture",
             default="seamless dark wood texture, highly detailed, 8k"
@@ -105,7 +108,8 @@ class Predictor(BasePredictor):
         enhanced_prompt = f"{prompt}, seamless tileable texture, top-down view, flat lighting, PBR material"
 
         print("Generating diffuse with z-image-turbo...")
-        output = replicate.run(
+        client = replicate.Client(api_token=replicate_api_token)
+        output = client.run(
             "prunaai/z-image-turbo",
             input={
                 "prompt": enhanced_prompt,

@@ -24,7 +24,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          pip install huggingface_hub diffusers torch transformers accelerate
+          pip install huggingface_hub diffusers torch transformers accelerate protobuf sentencepiece
           mkdir -p model_cache
           python -c "
           import os

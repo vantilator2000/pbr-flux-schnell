@@ -18,6 +18,7 @@ build:
     - "scipy"
     - "safetensors"
   run:
-    - python -c "from diffusers import FluxPipeline; FluxPipeline.from_pretrained('black-forest-labs/FLUX.1-schnell', torch_dtype='auto')"
+    - mkdir -p /root/.cache/huggingface
+    - cp -r model_cache/* /root/.cache/huggingface/ || true
 
 predict: "predict.py:Predictor"

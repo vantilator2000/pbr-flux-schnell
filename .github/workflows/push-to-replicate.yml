@@ -15,14 +15,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download Flux model to local cache
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          pip install huggingface_hub
+          huggingface-cli login --token $HF_TOKEN
+          mkdir -p model_cache
+          export HF_HOME=$(pwd)/model_cache
+          pip install diffusers torch transformers accelerate
+          python -c "import os; os.environ['HF_HOME']='$(pwd)/model_cache'; from diffusers import FluxPipeline; FluxPipeline.from_pretrained('black-forest-labs/FLUX.1-schnell', torch_dtype='auto', cache_dir='$(pwd)/model_cache')"
+          ls -la model_cache/
+
       - name: Setup Cog
         uses: replicate/setup-cog@v2
         with:
           token: ${{ secrets.REPLICATE_API_TOKEN }}
 
       - name: Build and Push
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           cog build -t r8.im/vantilator2000/pbr-flux
           cog push r8.im/vantilator2000/pbr-flux
